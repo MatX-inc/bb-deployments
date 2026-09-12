@@ -17,19 +17,31 @@ failure mode the feature removes.
   and returns `{}` unless enabled, because an unpatched scheduler rejects them
   as unknown fields at startup. `bare/config/scheduler.jsonnet` itself is
   unchanged and `bazel run //bare:bare` behaves as before.
+- `bare/config/worker_harness.jsonnet` and `runner_harness.jsonnet` extend
+  `worker.jsonnet`/`runner.jsonnet` for a second worker/runner pair (scenario
+  i): diagnostics port, `pool=<x>` platform property, runner concurrency and
+  worker hostname come from the environment; every path in the base configs
+  is relative, so the pair runs from its own working directory `$WORK_DIR/x`.
 - `synthetic/` is a dependency-free client workspace: ten `sleep 20` genrules
   carrying `exec_properties = {"token:synthetic": "1"}` (`//:tokened`), four
-  untokened `sleep 5` controls (`//:controls`), and `//:bogus` requiring a
-  pool no scheduler configures. Every command embeds `$(RUN_ID)`; the script
-  passes a fresh `--define=RUN_ID=...` per build so nothing is an action cache
-  hit. Its `.bazelrc` targets `grpc://localhost:8980`, instance `local`,
+  untokened `sleep 5` controls (`//:controls`), `//:bogus` requiring a pool
+  no scheduler configures, `//:oversized` requiring more than the capacity,
+  and the scenario i quartet `//:i_a`, `//:i_b` (tokened, `pool=x`),
+  `//:i_e` (token-free, `pool=x`, `sleep 40`), `//:i_f` (tokened, default
+  platform). Every command embeds `$(RUN_ID)`; the script passes a fresh
+  `--define=RUN_ID=...` per build so nothing is an action cache hit. Its
+  `.bazelrc` targets `grpc://localhost:8980`, instance `local`,
   `--spawn_strategy=remote`.
 - `bare/token_scenario.sh` builds `//bare:bare` with the scheduler under test
   swapped in via `--override_module=com_github_buildbarn_bb_remote_execution`,
   launches the six processes itself (the `bare` launcher stops all of them
   when any one exits, so it cannot restart only the scheduler), samples
   `:9982/metrics` once a second, runs the scenarios and prints a PASS/FAIL
-  table. Logs and samples land in `$RUN_DIR`.
+  table. Logs and samples land in `$RUN_DIR`; the monitoring-surface
+  scenarios g-j save what they fetched (admin pages, BuildQueueState JSON,
+  metric series, operation timelines) under `$RUN_DIR/proof/`, together with
+  the slice of the scheduler log between `### harness start/end scenario`
+  markers for every scenario.
 
 ## Running
 
@@ -42,6 +54,9 @@ BUILD_STARTUP=--bazelrc=/path/to/rbe.bazelrc BUILD_FLAGS=--config=rbe TOKENS=1 b
 
 # Reuse the last build, baseline expectations (stock scheduler):
 BUILD=0 TOKENS=0 bare/token_scenario.sh
+
+# Reservation window (scenario i): capacity 1 and the second worker pair.
+BUILD=0 TOKENS=1 TOKEN_POOL_CAPACITY=1 SCENARIOS=i bare/token_scenario.sh
 ```
 
 Knobs, all environment variables with defaults in the script:
@@ -56,14 +71,16 @@ Knobs, all environment variables with defaults in the script:
 | `BUILD`, `BUILD_STARTUP`, `BUILD_FLAGS` | skip the build, add startup options (`--bazelrc=`), add build flags (`--config=`) |
 | `BAZEL_STARTUP`, `OUTPUT_USER_ROOT` | startup options for the deployment build (default `--output_user_root=/bazel-cache/greg/bbdep --host_jvm_args=-Xmx6g`) |
 | `LAUNCH=0`, `EXECUTOR`, `INSTANCE_NAME`, `METRICS_URL`, `ADMIN_URL`, `BQS_ADDRESS` | target a deployment that is already running elsewhere |
-| `GRPCURL` | path to grpcurl for scenario e; falls back to the admin HTML |
-| `SCENARIOS` | subset of `ab c d e f` |
+| `GRPCURL` | path to grpcurl (default: `$PATH`, then `$HARNESS_ROOT/bin/grpcurl`); scenario e falls back to the admin HTML without it, h and i need it |
+| `SCENARIOS` | subset of `ab c d e f gh i j`; default `ab c d e f gh j` |
+| `WORKER_X`, `WORKER_X_POOL`, `WORKER_X_CONCURRENCY`, `WORKER_X_DIAG_PORT`, `RUNNER_X_DIAG_PORT` | second worker/runner pair; `WORKER_X=auto` (default) launches it only when scenario i is selected, platform `pool=x`, concurrency 1, ports 9988/9989 |
+| `I_FILLER_PRIORITY` | REv2 priority of the token-free filler in scenario i (default `-100`, lower runs first) |
 | `WORK_DIR`, `RUN_DIR`, `KEEP=1` | bare working directory, per-run output, leave the deployment up on exit |
 
-The bare processes hold ports 7982, 8980-8984, 9982, 9986, 9987; the script
-refuses to launch while any is in use. The client runs with
-`--nosystem_rc --nohome_rc` so this host's BES or cache settings do not sit
-between the client and the deployment under test.
+The bare processes hold ports 7982, 8980-8984, 9982, 9986, 9987 (plus 9988,
+9989 for the second pair); the script refuses to launch while any is in use.
+The client runs with `--nosystem_rc --nohome_rc` so this host's BES or cache
+settings do not sit between the client and the deployment under test.
 
 Building against a checkout newer than the pinned `bb_remote_execution` needs
 the root `go.sum` to know the checkout's dependency versions: gazelle's
@@ -82,11 +99,18 @@ longer carries.
 | d | Restart safety | SIGKILL the scheduler once `in_use >= 1`, relaunch it; the tokened build still succeeds and, after the grace period, `1 <= in_use <= capacity` | skipped |
 | e | BuildQueueState exposes pools | `ListPlatformQueues.tokenPools` (grpcurl, server reflection) lists `synthetic` with capacity 2 | nothing listed |
 | f | Oversized requests fail fast | `//:oversized` (`token:synthetic=3`) fails in under 30 s with FailedPrecondition mentioning the capacity | skipped |
+| g | Admin UI shows the pool and its holders | while `//:tokened` saturates the pool: the token pools row on `:7982/` shows the capacity and in-use/reserved/blocked numbers within ±1 of the `:9982` gauges scraped in the same second; the row's in-use link lists only EXECUTING operations requiring the token, the blocked link only operations "blocked on token", each count within ±1 of the row | skipped |
+| h | BuildQueueState token filters | same moment, via grpcurl: `ListOperations{filter_token_name,filter_token_instance_name_prefix}` returns only operations requiring the token, with EXECUTING count == `in_use` and `blocked_on_token` count == `blocked_tasks` (±1); `filter_token_blocked_only` returns exactly the parked set; a prefix without a pool returns nothing; a prefix with a reserved keyword (`operations`) is InvalidArgument | skipped |
+| i | Reservation window; FIFO not overtaken across platform queues | capacity 1, two platform queues sharing the pool. A (tokened, `pool=x`) runs on worker X; E (token-free, `pool=x`, `sleep 40`, priority `I_FILLER_PRIORITY`) queues behind it; B (tokened, `pool=x`) parks. When A ends, B leaves the FIFO with a reservation and X takes E, so `reserved==1`, `in_use==0` for at least 10 consecutive seconds; F (tokened, default platform) must park while the default worker is idle and may only start after B; no overcommit | skipped; also skipped unless `TOKEN_POOL_CAPACITY=1` and the second worker pair is up |
+| j | Metric series are bounded | `:9982/metrics` has exactly one series per gauge for the pool and, for each rejection produced earlier in the same scheduler process (c: `UnknownPool`, f: `ExceedsCapacity`), one `..._rejections_total{instance_name_prefix,reason}` series with that count; the client's token name never appears as a label | skipped |
 
 The metrics sampled are
 `buildbarn_builder_in_memory_build_queue_token_pool_{capacity,in_use,reserved,blocked_tasks}{instance_name_prefix,token}`.
-Scenarios a and d also require `in_use + reserved <= capacity` at every
+Scenarios a, d and i also require `in_use + reserved <= capacity` at every
 sample (`reserved` counts tokens promised to unparked tasks not yet running).
+Scenario i additionally records a one-second operation timeline
+(`proof/i_ops.tsv`: target, stage, `blocked_on_token`, token requirements)
+from `ListOperations`, from which the start order of A, E, B and F is read.
 
 ## Baseline result (stock scheduler, 2026-09-12)
 
@@ -136,3 +160,72 @@ Pools are looked up by the platform queue's prefix: with the default worker
 config (`instanceNamePrefix` unset) a pool declared for prefix `local` is
 invisible to actions sent with `--remote_instance_name=local`, and they fail
 with `No token pool named "synthetic" exists for instance name prefix ""`.
+
+## Monitoring surfaces against the live scheduler (`660c1e3`, 2026-09-12)
+
+Default set, capacity 2, grace 5 s (run `20260912-043142`):
+
+```
+SCEN STATUS DETAIL
+a    PASS   tokened rc=0 101s; max in_use=2 max blocked=8 max reserved=0; in_use+reserved>capacity in 0 of 99 samples; serialized into waves (>90s)
+b    PASS   controls rc=0 in 6s while tokened work took 101s
+c    PASS   bogus token rejected in 0s: FAILED_PRECONDITION: No token pool named "bogus" exists for instance name prefix ""
+d    PASS   rc=0 111s; scheduler down 1s; during grace in_use=0 blocked=10; max in_use after grace=2; in_use+reserved>capacity in 0 samples
+e    PASS   pool synthetic capacity 2 listed via grpcurl
+f    PASS   3 tokens against capacity 2 rejected in 1s: FAILED_PRECONDITION: Action requires 3 tokens of pool "synthetic" for instance name prefix "", which exceeds its capacity of 2
+g    PASS   row cap=2 in_use=2 reserved=0 blocked=8 vs gauges in_use=2 reserved=0 blocked=8; in-use page rows=2 with_token=2 executing=2; blocked page rows=8 with_token=8 parked=8
+h    PASS   filter_token: 16 ops (16 require synthetic), executing=2 vs in_use=2, blocked_on_token=8 vs blocked=8; blocked_only=8 ops; wrong prefix=0 ops; malformed prefix rc=67 Code: InvalidArgument
+j    PASS   5 series: blocked_tasks{...} 0 capacity{...} 2 in_use{...} 0 rejections_total{instance_name_prefix="",reason="ExceedsCapacity"} 1 reserved{...} 0 ; matches expected set (UnknownPool=0 ExceedsCapacity=1)
+```
+
+The 16 operations in h are the 10 of the in-flight build plus 6 completed
+ones the scheduler still lists; only the EXECUTING and `blocked_on_token`
+counts are compared with the gauges. j lists no `UnknownPool` series because
+scenario c's rejection was counted by the scheduler process that d killed;
+counters restart with the process, and the harness resets its expectation
+when it relaunches the scheduler. A run of `c gh j` alone (`20260912-041639`)
+shows `rejections_total{instance_name_prefix="",reason="UnknownPool"} 1` and
+the same g/h numbers.
+
+Scenario i, capacity 1, second worker pair (`TOKEN_POOL_CAPACITY=1
+SCENARIOS=i`), filler priority -100 (run `20260912-041907`):
+
+```
+i    PASS   rc A=0 B=0 E=0 F=0; X took E (filler, priority -100) before B; reserved==1 for 40 consecutive s with max in_use=0; F parked at +22s with 8 idle default worker(s); start offsets E=+20s B=+60s F=+81s; overcommits=0
+```
+
+Operation timeline (`proof/i_ops.tsv`, offsets from A's start) and gauges
+(`proof/i_metrics.txt`):
+
+```
++0s   A EXECUTING                         in_use=1 reserved=0 blocked=0
++2s   E QUEUED (behind A on worker X)
++5s   B QUEUED blocked_on_token=synthetic  in_use=1 reserved=0 blocked=1
++20s  A done; E EXECUTING on X            in_use=0 reserved=1 blocked=0   <- B off the FIFO, token reserved
++21s  F QUEUED blocked_on_token=synthetic  in_use=0 reserved=1 blocked=1   <- default worker idle (8/8), F still parks
++60s  E done; B EXECUTING on X            in_use=1 reserved=0 blocked=1
++81s  B done; F EXECUTING on default      in_use=1 reserved=0 blocked=0
+```
+
+`ListPlatformQueues` at the moment F parked: platform `{pool=x}` 1 worker
+executing, 1 queued (B, indirect); platform `{}` 8 workers all idle,
+`blockedOperationsCount` 1 (F); `tokenPools:
+[{"name":"synthetic","capacity":1,"blockedTasksCount":1,"reserved":1}]`.
+Without the reservation F would have taken the token while B waited behind E,
+which is the FIFO leak the reservation fixes.
+
+The scheduler picks between B's and E's invocations with `isPreferred`:
+equal executing counts and equal priority tie-break on `lastOperationStarted`,
+which is unset for both fresh invocations, so the code promises no order. The
+harness submits E before B and gives the filler REv2 priority -100 (factor 2
+in the score), which makes X take E regardless of heap layout. A probe with
+`I_FILLER_PRIORITY=0` (run `20260912-042834`) produced the same timeline
+(E +20 s, B +60 s, F +81 s, `reserved==1` for 40 s): on a tie the heap keeps
+the earlier-pushed child at its root, so submission order alone sufficed
+there, but that is an implementation detail rather than a guarantee.
+
+The scheduler log carries nothing about token pools at the default log
+level: across all runs its only lines are the shutdown notice and, in
+scenario d, the second process's startup. `proof/<scenario>_scheduler.log`
+slices are therefore empty apart from the harness markers; metrics,
+BuildQueueState and the admin UI are the observability surface.

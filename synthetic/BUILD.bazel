@@ -53,3 +53,44 @@ filegroup(
     name = "controls",
     srcs = ["control_%d" % i for i in range(CONTROL_COUNT)],
 )
+
+# Scenario i (reservation window): worker X serves platform pool=x with
+# concurrency 1; the default worker serves the empty platform. The pool has
+# capacity 1 in that scenario.
+genrule(
+    name = "i_a",
+    outs = ["i_a.txt"],
+    cmd = "sleep 20 && echo i_a run=$(RUN_ID) > $@",
+    exec_properties = {
+        "pool": "x",
+        "token:synthetic": "1",
+    },
+)
+
+genrule(
+    name = "i_b",
+    outs = ["i_b.txt"],
+    cmd = "sleep 20 && echo i_b run=$(RUN_ID) > $@",
+    exec_properties = {
+        "pool": "x",
+        "token:synthetic": "1",
+    },
+)
+
+# Token-free filler that keeps worker X busy after i_a, so that i_b's
+# reservation is held for its whole duration.
+genrule(
+    name = "i_e",
+    outs = ["i_e.txt"],
+    cmd = "sleep 40 && echo i_e run=$(RUN_ID) > $@",
+    exec_properties = {"pool": "x"},
+)
+
+# Tokened work for the default platform, whose worker is idle; it must still
+# wait while the token is reserved for i_b.
+genrule(
+    name = "i_f",
+    outs = ["i_f.txt"],
+    cmd = "sleep 20 && echo i_f run=$(RUN_ID) > $@",
+    exec_properties = {"token:synthetic": "1"},
+)
