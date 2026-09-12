@@ -11,3 +11,5 @@ build --spawn_strategy=remote
 build --remote_retries=10
 build --remote_download_toplevel
 common --lockfile_mode=off
+# Several output bases share this workspace; keep bazel-* symlinks out of it.
+build --experimental_convenience_symlinks=ignore
