@@ -57,7 +57,7 @@ Knobs, all environment variables with defaults in the script:
 | `BAZEL_STARTUP`, `OUTPUT_USER_ROOT` | startup options for the deployment build (default `--output_user_root=/bazel-cache/greg/bbdep --host_jvm_args=-Xmx6g`) |
 | `LAUNCH=0`, `EXECUTOR`, `INSTANCE_NAME`, `METRICS_URL`, `ADMIN_URL`, `BQS_ADDRESS` | target a deployment that is already running elsewhere |
 | `GRPCURL` | path to grpcurl for scenario e; falls back to the admin HTML |
-| `SCENARIOS` | subset of `ab c d e` |
+| `SCENARIOS` | subset of `ab c d e f` |
 | `WORK_DIR`, `RUN_DIR`, `KEEP=1` | bare working directory, per-run output, leave the deployment up on exit |
 
 The bare processes hold ports 7982, 8980-8984, 9982, 9986, 9987; the script
@@ -84,7 +84,9 @@ longer carries.
 | f | Oversized requests fail fast | `//:oversized` (`token:synthetic=3`) fails in under 30 s with FailedPrecondition mentioning the capacity | skipped |
 
 The metrics sampled are
-`buildbarn_builder_in_memory_build_queue_token_pool_{capacity,in_use,blocked_tasks}{instance_name_prefix,token}`.
+`buildbarn_builder_in_memory_build_queue_token_pool_{capacity,in_use,reserved,blocked_tasks}{instance_name_prefix,token}`.
+Scenarios a and d also require `in_use + reserved <= capacity` at every
+sample (`reserved` counts tokens promised to unparked tasks not yet running).
 
 ## Baseline result (stock scheduler, 2026-09-12)
 
@@ -109,18 +111,19 @@ scheduler exits at startup:
 `Failed to unmarshal configuration: proto: (line 90:4): unknown field
 "tokenPoolStartupGracePeriod"`, which is why the fields stay behind the flag.
 
-## Result with token pools (bb-remote-execution `dfa74d8`, 2026-09-12)
+## Result with token pools (bb-remote-execution `660c1e3`, 2026-09-12)
 
-`TOKENS=1`, capacity 2, grace 5 s:
+`TOKENS=1`, capacity 2, grace 5 s (the same table, minus the `reserved`
+numbers, was produced by the branch's previous commit `dfa74d8`):
 
 ```
 SCEN STATUS DETAIL
-a    PASS   tokened rc=0 101s; max in_use=2 max blocked=8 (99 samples); serialized into waves (>90s)
+a    PASS   tokened rc=0 101s; max in_use=2 max blocked=8 max reserved=0; in_use+reserved>capacity in 0 of 99 samples; serialized into waves (>90s)
 b    PASS   controls rc=0 in 6s while tokened work took 101s
 c    PASS   bogus token rejected in 0s: FAILED_PRECONDITION: No token pool named "bogus" exists for instance name prefix ""
-d    PASS   rc=0 111s; scheduler down 2s; during grace in_use=0 blocked=10; max in_use after grace=2
+d    PASS   rc=0 110s; scheduler down 1s; during grace in_use=0 blocked=10; max in_use after grace=2; in_use+reserved>capacity in 0 samples
 e    PASS   pool synthetic capacity 2 listed via grpcurl
-f    PASS   3 tokens against capacity 2 rejected in 0s: FAILED_PRECONDITION: Action requires 3 tokens of pool "synthetic" for instance name prefix "", which exceeds its capacity of 2
+f    PASS   3 tokens against capacity 2 rejected in 1s: FAILED_PRECONDITION: Action requires 3 tokens of pool "synthetic" for instance name prefix "", which exceeds its capacity of 2
 ```
 
 `in_use`/`blocked_tasks` over scenario a: `2/8` at t+1 s, then `2/6`, `2/4`,

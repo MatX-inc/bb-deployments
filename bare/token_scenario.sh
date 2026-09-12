@@ -219,6 +219,11 @@ metric_max() { # file metric [since_epoch] [until_epoch]
     '$2 == m && $1 >= since && $1 <= until { if ($3 > x) x = $3 } END { print x + 0 }' "$1"
 }
 metric_samples() { awk -v m="$2" '$2 == m' "$1" | wc -l; }
+# Number of samples where in_use + reserved exceeds capacity (must be 0).
+metric_overcommits() { # file
+  awk '{ v[$1, $2] = $3; ts[$1] = 1 }
+       END { n = 0; for (t in ts) if (v[t, "in_use"] + v[t, "reserved"] > v[t, "capacity"]) n++; print n }' "$1"
+}
 wait_for_metric_at_least() { # file metric value timeout_s [pid that must stay alive]
   local deadline=$(( $(now) + $4 ))
   while (( $(metric_max "$1" "$2") < $3 )); do
@@ -262,17 +267,18 @@ scenario_ab() {
   rb=0; wait $pb || rb=$?; tb=$(( $(now) - t0 ))
   ra=0; wait $pa || ra=$?; ta=$(( $(now) - t0 ))
   sampler_stop
-  local in_use blocked samples
+  local in_use blocked reserved samples over
   in_use=$(metric_max "$m" in_use); blocked=$(metric_max "$m" blocked_tasks)
+  reserved=$(metric_max "$m" reserved); over=$(metric_overcommits "$m")
   samples=$(metric_samples "$m" in_use)
-  local detail="tokened rc=$ra ${ta}s; max in_use=$in_use max blocked=$blocked (${samples} samples)"
+  local detail="tokened rc=$ra ${ta}s; max in_use=$in_use max blocked=$blocked max reserved=$reserved; in_use+reserved>capacity in $over of ${samples} samples"
   if [[ $TOKENS == 1 ]]; then
     local expect_blocked=$(( TOKENED_COUNT - TOKEN_POOL_CAPACITY ))
     local expect_wall=$(( (TOKENED_COUNT + TOKEN_POOL_CAPACITY - 1) / TOKEN_POOL_CAPACITY * 20 - 10 ))
-    if (( ra == 0 && ta > expect_wall && in_use <= TOKEN_POOL_CAPACITY && in_use == TOKEN_POOL_CAPACITY && blocked >= expect_blocked )); then
+    if (( ra == 0 && ta > expect_wall && in_use == TOKEN_POOL_CAPACITY && blocked >= expect_blocked && over == 0 )); then
       record a PASS "$detail; serialized into waves (>${expect_wall}s)"
     else
-      record a FAIL "$detail; expected rc=0, wall>${expect_wall}s, in_use==$TOKEN_POOL_CAPACITY, blocked>=$expect_blocked; $(grep_error "$la" "$ERR_RE")"
+      record a FAIL "$detail; expected rc=0, wall>${expect_wall}s, in_use==$TOKEN_POOL_CAPACITY, blocked>=$expect_blocked, no overcommit; $(grep_error "$la" "$ERR_RE")"
     fi
   else
     local err; err=$(grep_error "$la" 'No workers exist')
@@ -333,11 +339,12 @@ scenario_d() {
   local after; after=$(metric_max "$m" in_use "$grace_end")
   local in_grace; in_grace=$(metric_max "$m" in_use "$SCHEDULER_START" "$(( grace_end - 2 ))")
   local requeued; requeued=$(metric_max "$m" blocked_tasks "$SCHEDULER_START" "$(( grace_end - 2 ))")
-  local detail="rc=$rd ${td}s; scheduler down $(( t_up - t_kill ))s; during grace in_use=$in_grace blocked=$requeued; max in_use after grace=$after"
-  if (( rd == 0 && in_grace == 0 && after >= 1 && after <= TOKEN_POOL_CAPACITY )); then
+  local over; over=$(metric_overcommits "$m")
+  local detail="rc=$rd ${td}s; scheduler down $(( t_up - t_kill ))s; during grace in_use=$in_grace blocked=$requeued; max in_use after grace=$after; in_use+reserved>capacity in $over samples"
+  if (( rd == 0 && in_grace == 0 && after >= 1 && after <= TOKEN_POOL_CAPACITY && over == 0 )); then
     record d PASS "$detail"
   else
-    record d FAIL "$detail; expected rc=0, in_use==0 during grace, 1<=in_use<=$TOKEN_POOL_CAPACITY after; $(grep_error "$ld" "$ERR_RE")"
+    record d FAIL "$detail; expected rc=0, in_use==0 during grace, 1<=in_use<=$TOKEN_POOL_CAPACITY after, no overcommit; $(grep_error "$ld" "$ERR_RE")"
   fi
 }
 
