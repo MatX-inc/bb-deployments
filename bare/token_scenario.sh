@@ -40,13 +40,16 @@ REPO=$(cd "$HERE/.." && pwd)
 
 # Scheduler configuration (scheduler_harness.jsonnet reads these).
 : "${TOKENS:=0}"                             # 1 = configure the token pool
-: "${TOKEN_POOL_INSTANCE_NAME_PREFIX:=$INSTANCE_NAME}"
+# Pools are resolved by the platform queue's prefix, i.e. the worker's
+# instanceNamePrefix ('' in bare/config/worker.jsonnet), not by the client's
+# --remote_instance_name.
+: "${TOKEN_POOL_INSTANCE_NAME_PREFIX=}"
 : "${TOKEN_POOL_NAME:=synthetic}"
 : "${TOKEN_POOL_CAPACITY:=2}"
 : "${TOKEN_POOL_STARTUP_GRACE_PERIOD:=5s}"
 : "${PLATFORM_QUEUE_WITH_NO_WORKERS_TIMEOUT:=10s}"
 
-: "${SCENARIOS:=ab c d e}"
+: "${SCENARIOS:=ab c d e f}"
 TOKENED_COUNT=10
 CONTROL_COUNT=4
 
@@ -61,7 +64,7 @@ mkdir -p "$LOG_DIR"
 declare -A PIDS=()
 SAMPLER_PID=
 # One Bazel output base per scenario so client builds can run concurrently.
-CLIENT_BASES=("$RUN_DIR"/ob-{a,b,c,d})
+CLIENT_BASES=("$RUN_DIR"/ob-{a,b,c,d,f})
 RESULTS=()
 FAILED=0
 
@@ -211,14 +214,16 @@ sampler_start() { # file
   SAMPLER_PID=$!
 }
 sampler_stop() { [[ -n $SAMPLER_PID ]] && kill "$SAMPLER_PID" 2>/dev/null; SAMPLER_PID=; }
-metric_max() { # file metric [since_epoch]
-  awk -v m="$2" -v since="${3:-0}" '$2 == m && $1 >= since { if ($3 > x) x = $3 } END { print x + 0 }' "$1"
+metric_max() { # file metric [since_epoch] [until_epoch]
+  awk -v m="$2" -v since="${3:-0}" -v until="${4:-9999999999}" \
+    '$2 == m && $1 >= since && $1 <= until { if ($3 > x) x = $3 } END { print x + 0 }' "$1"
 }
 metric_samples() { awk -v m="$2" '$2 == m' "$1" | wc -l; }
-wait_for_metric_at_least() { # file metric value timeout_s
+wait_for_metric_at_least() { # file metric value timeout_s [pid that must stay alive]
   local deadline=$(( $(now) + $4 ))
   while (( $(metric_max "$1" "$2") < $3 )); do
     (( $(now) > deadline )) && return 1
+    if [[ -n ${5:-} ]] && ! kill -0 "$5" 2>/dev/null; then return 1; fi
     sleep 1
   done
 }
@@ -237,7 +242,7 @@ client_build() { # output_base_name targets...
     --remote_executor="$EXECUTOR" --remote_instance_name="$INSTANCE_NAME" "$@"
 }
 client_warm() { # output_base_name
-  client_bazel "$1" build --nobuild --define=RUN_ID=warm //:tokened //:controls //:bogus \
+  client_bazel "$1" build --nobuild --define=RUN_ID=warm //:tokened //:controls //:bogus //:oversized \
     >"$LOG_DIR/warm-$1.log" 2>&1
 }
 grep_error() { # log pattern: first match plus up to 200 following characters
@@ -308,9 +313,9 @@ scenario_d() {
   local t0 rd td
   t0=$(now)
   client_build d //:tokened >"$ld" 2>&1 & local pd=$!
-  if ! wait_for_metric_at_least "$m" in_use 1 60; then
-    sampler_stop; kill $pd 2>/dev/null; wait $pd || true
-    record d FAIL "no token was acquired within 60s before the restart"; return
+  if ! wait_for_metric_at_least "$m" in_use 1 60 $pd; then
+    sampler_stop; kill $pd 2>/dev/null || true; wait $pd || true
+    record d FAIL "no token was acquired within 60s before the restart; $(grep_error "$ld" "$ERR_RE")"; return
   fi
   sleep 3
   log "Killing scheduler pid ${PIDS[scheduler]} mid-run"
@@ -319,16 +324,20 @@ scenario_d() {
   start_scheduler
   wait_for_scheduler
   local t_up; t_up=$(now)
-  local grace_end=$(( t_up + $(duration_s "$TOKEN_POOL_STARTUP_GRACE_PERIOD") ))
+  # The grace period starts with the scheduler process. Samples at 1 s
+  # resolution: leave a 2 s margin before its end when asserting it held.
+  local grace_s; grace_s=$(duration_s "$TOKEN_POOL_STARTUP_GRACE_PERIOD")
+  local grace_end=$(( SCHEDULER_START + grace_s ))
   rd=0; wait $pd || rd=$?; td=$(( $(now) - t0 ))
   sampler_stop
   local after; after=$(metric_max "$m" in_use "$grace_end")
-  local in_grace; in_grace=$(metric_max "$m" in_use "$t_up")
-  local detail="rc=$rd ${td}s; scheduler down $(( t_up - t_kill ))s; max in_use after grace=$after (during grace=$in_grace)"
-  if (( rd == 0 && after >= 1 && after <= TOKEN_POOL_CAPACITY )); then
+  local in_grace; in_grace=$(metric_max "$m" in_use "$SCHEDULER_START" "$(( grace_end - 2 ))")
+  local requeued; requeued=$(metric_max "$m" blocked_tasks "$SCHEDULER_START" "$(( grace_end - 2 ))")
+  local detail="rc=$rd ${td}s; scheduler down $(( t_up - t_kill ))s; during grace in_use=$in_grace blocked=$requeued; max in_use after grace=$after"
+  if (( rd == 0 && in_grace == 0 && after >= 1 && after <= TOKEN_POOL_CAPACITY )); then
     record d PASS "$detail"
   else
-    record d FAIL "$detail; expected rc=0 and 1<=in_use<=$TOKEN_POOL_CAPACITY after the grace period; $(grep_error "$ld" "$ERR_RE")"
+    record d FAIL "$detail; expected rc=0, in_use==0 during grace, 1<=in_use<=$TOKEN_POOL_CAPACITY after; $(grep_error "$ld" "$ERR_RE")"
   fi
 }
 
@@ -354,6 +363,20 @@ scenario_e() {
   fi
 }
 
+scenario_f() {
+  if [[ $TOKENS != 1 ]]; then record f SKIP "oversized request needs token pools on"; return; fi
+  local lf=$LOG_DIR/build_f.log t0 rf tf
+  client_warm f
+  t0=$(now)
+  rf=0; client_build f //:oversized >"$lf" 2>&1 || rf=$?; tf=$(( $(now) - t0 ))
+  local err; err=$(grep_error "$lf" '(FAILED_PRECONDITION|FailedPrecondition)')
+  if (( rf != 0 && tf < 30 )) && [[ -n $err ]] && grep -qi 'capacity' "$lf"; then
+    record f PASS "3 tokens against capacity $TOKEN_POOL_CAPACITY rejected in ${tf}s: ${err:0:160}"
+  else
+    record f FAIL "rc=$rf in ${tf}s; expected rc!=0, <30s, FailedPrecondition mentioning capacity; got: $(grep_error "$lf" "(ERROR|$ERR_RE)" | head -c 200)"
+  fi
+}
+
 # --- Main --------------------------------------------------------------------
 log "run dir $RUN_DIR; mode $([[ $TOKENS == 1 ]] && echo tokens-on || echo baseline)"
 if [[ $LAUNCH == 1 ]]; then
@@ -370,6 +393,7 @@ for s in $SCENARIOS; do
     c) scenario_c ;;
     d) scenario_d ;;
     e) scenario_e ;;
+    f) scenario_f ;;
     *) log "unknown scenario $s"; exit 2 ;;
   esac
 done

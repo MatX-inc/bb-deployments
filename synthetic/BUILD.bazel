@@ -36,6 +36,14 @@ genrule(
     exec_properties = {"token:bogus": "1"},
 )
 
+# Requires more tokens than the pool's capacity of 2.
+genrule(
+    name = "oversized",
+    outs = ["oversized.txt"],
+    cmd = "sleep 1 && echo oversized run=$(RUN_ID) > $@",
+    exec_properties = {"token:synthetic": "3"},
+)
+
 filegroup(
     name = "tokened",
     srcs = ["tokened_%d" % i for i in range(TOKENED_COUNT)],
