@@ -1,0 +1,47 @@
+# Synthetic load for bare/token_scenario.sh.
+#
+# Every command embeds $(RUN_ID), which the script passes as
+# --define=RUN_ID=<unique>, so no run is an action cache hit. Building without
+# it fails on purpose.
+
+TOKENED_COUNT = 10
+
+CONTROL_COUNT = 4
+
+[
+    genrule(
+        name = "tokened_%d" % i,
+        outs = ["tokened_%d.txt" % i],
+        cmd = "sleep 20 && echo tokened_%d run=$(RUN_ID) > $@" % i,
+        exec_properties = {"token:synthetic": "1"},
+    )
+    for i in range(TOKENED_COUNT)
+]
+
+# Token-free work that must never wait behind a saturated pool.
+[
+    genrule(
+        name = "control_%d" % i,
+        outs = ["control_%d.txt" % i],
+        cmd = "sleep 5 && echo control_%d run=$(RUN_ID) > $@" % i,
+    )
+    for i in range(CONTROL_COUNT)
+]
+
+# Requires a token pool the scheduler does not configure.
+genrule(
+    name = "bogus",
+    outs = ["bogus.txt"],
+    cmd = "sleep 1 && echo bogus run=$(RUN_ID) > $@",
+    exec_properties = {"token:bogus": "1"},
+)
+
+filegroup(
+    name = "tokened",
+    srcs = ["tokened_%d" % i for i in range(TOKENED_COUNT)],
+)
+
+filegroup(
+    name = "controls",
+    srcs = ["control_%d" % i for i in range(CONTROL_COUNT)],
+)
