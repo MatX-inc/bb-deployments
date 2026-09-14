@@ -1,2 +1,6 @@
 # Ignore all the volume mounts in the Docker Compose deployment.
 docker-compose/volumes
+# The token harness client is its own Bazel module (bare/TOKEN_HARNESS.md);
+# its genrules need the RUN_ID define the harness passes and must not be
+# analyzed as part of this workspace.
+synthetic
