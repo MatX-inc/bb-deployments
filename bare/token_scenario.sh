@@ -156,15 +156,16 @@ build_deployment() {
     >"$LOG_DIR/build_re.log" 2>&1 || { tail -30 "$LOG_DIR/build_re.log" >&2; return 1; }
 }
 
-runfiles_dir() {
-  local bin
-  bin=$(cd "$REPO" && $BAZEL $BAZEL_STARTUP info bazel-bin 2>/dev/null)
-  echo "$bin/bare/bare_/bare.runfiles"
-}
-re_bin_dir() {
-  local bin
-  bin=$(cd "$BB_RE_DIR" && $BAZEL $BAZEL_STARTUP info bazel-bin 2>/dev/null)
-  echo "$bin/cmd"
+# Absolute path of a target's output file under the flags it was built with.
+# The Go binaries sit behind a configuration transition, so their output
+# directory carries a hash that `bazel info bazel-bin` does not show.
+target_file() { # workspace startup_options build_flags target
+  local ws=$1 startup=$2 flags=$3 target=$4 root rel
+  root=$(cd "$ws" && $BAZEL $BAZEL_STARTUP $startup info execution_root 2>/dev/null)
+  rel=$(cd "$ws" && $BAZEL $BAZEL_STARTUP $startup cquery $flags \
+    --experimental_convenience_symlinks=ignore --output=files "$target" 2>/dev/null | head -1)
+  [[ -n $root && -n $rel ]] || { log "cannot locate $target in $ws"; return 1; }
+  echo "$root/$rel"
 }
 
 start_process() { # name binary config [working directory]
@@ -187,21 +188,22 @@ check_ports_free() {
 
 launch_deployment() {
   check_ports_free
-  local rf; rf=$(runfiles_dir)
+  local rf; rf=$(target_file "$REPO" "$BUILD_STARTUP" "$BUILD_FLAGS" //bare:bare).runfiles
   local storage=$rf/com_github_buildbarn_bb_storage+/cmd/bb_storage/bb_storage_/bb_storage
   local portal=$rf/com_github_buildbarn_bb_portal+/cmd/bb_portal/bb_portal_/bb_portal
-  RE_BIN_DIR=$(re_bin_dir)
+  WORKER_BIN=$(target_file "$BB_RE_DIR" "$RE_BUILD_STARTUP" "$RE_BUILD_FLAGS" //cmd/bb_worker)
+  RUNNER_BIN=$(target_file "$BB_RE_DIR" "$RE_BUILD_STARTUP" "$RE_BUILD_FLAGS" //cmd/bb_runner)
   CFG_DIR=$HERE/config
   # Same directories the bare launcher creates.
   mkdir -p "$WORK_DIR"/{storage-ac,storage-cas,storage-fsac}/persistent_state \
     "$WORK_DIR"/worker/{build,cache,cas/persistent_state}
-  SCHEDULER_BIN=$RE_BIN_DIR/bb_scheduler/bb_scheduler_/bb_scheduler
+  SCHEDULER_BIN=$(target_file "$BB_RE_DIR" "$RE_BUILD_STARTUP" "$RE_BUILD_FLAGS" //cmd/bb_scheduler)
   SCHEDULER_CFG=$CFG_DIR/scheduler_harness.jsonnet
   start_process storage "$storage" "$CFG_DIR/storage.jsonnet"
   start_process frontend "$storage" "$CFG_DIR/frontend.jsonnet"
   start_scheduler
-  start_process worker "$RE_BIN_DIR/bb_worker/bb_worker_/bb_worker" "$CFG_DIR/worker.jsonnet"
-  start_process runner "$RE_BIN_DIR/bb_runner/bb_runner_/bb_runner" "$CFG_DIR/runner.jsonnet"
+  start_process worker "$WORKER_BIN" "$CFG_DIR/worker.jsonnet"
+  start_process runner "$RUNNER_BIN" "$CFG_DIR/runner.jsonnet"
   if [[ -x $portal ]]; then start_process portal "$portal" "$CFG_DIR/portal.jsonnet"; fi
   if [[ $WORKER_X == 1 ]]; then launch_worker_x; fi
 }
@@ -213,8 +215,8 @@ launch_worker_x() {
   mkdir -p "$dir"/worker/{build,cache,cas/persistent_state}
   export WORKER_POOL=$WORKER_X_POOL WORKER_CONCURRENCY=$WORKER_X_CONCURRENCY \
     WORKER_DIAG_PORT=$WORKER_X_DIAG_PORT RUNNER_DIAG_PORT=$RUNNER_X_DIAG_PORT WORKER_HOSTNAME=worker-x
-  start_process worker-x "$RE_BIN_DIR/bb_worker/bb_worker_/bb_worker" "$CFG_DIR/worker_harness.jsonnet" "$dir"
-  start_process runner-x "$RE_BIN_DIR/bb_runner/bb_runner_/bb_runner" "$CFG_DIR/runner_harness.jsonnet" "$dir"
+  start_process worker-x "$WORKER_BIN" "$CFG_DIR/worker_harness.jsonnet" "$dir"
+  start_process runner-x "$RUNNER_BIN" "$CFG_DIR/runner_harness.jsonnet" "$dir"
 }
 
 # Append a marker to the scheduler's log (O_APPEND keeps it in order with the
