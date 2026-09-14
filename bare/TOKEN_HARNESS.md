@@ -69,7 +69,7 @@ Knobs, all environment variables with defaults in the script:
 | `TOKEN_POOL_INSTANCE_NAME_PREFIX` | default empty: pools are resolved by the platform queue's prefix, which is the worker's `instanceNamePrefix` (empty in `worker.jsonnet`), not by the client's `--remote_instance_name` |
 | `PLATFORM_QUEUE_WITH_NO_WORKERS_TIMEOUT` | default `10s`, instead of upstream's `900s`, so an action for a platform without workers fails with FailedPrecondition instead of Unavailable retries |
 | `BUILD`, `BUILD_STARTUP`, `BUILD_FLAGS` | skip the build, add startup options (`--bazelrc=`), add build flags (`--config=`) |
-| `BAZEL_STARTUP`, `OUTPUT_USER_ROOT` | startup options for the deployment build (default `--output_user_root=/bazel-cache/greg/bbdep --host_jvm_args=-Xmx6g`) |
+| `BAZEL_STARTUP`, `OUTPUT_USER_ROOT` | startup options for the deployment build (default `--output_user_root=$HARNESS_ROOT/bazel --host_jvm_args=-Xmx6g`; `HARNESS_ROOT` defaults to `$TMPDIR/bb-bare`) |
 | `LAUNCH=0`, `EXECUTOR`, `INSTANCE_NAME`, `METRICS_URL`, `ADMIN_URL`, `BQS_ADDRESS` | target a deployment that is already running elsewhere |
 | `GRPCURL` | path to grpcurl (default: `$PATH`, then `$HARNESS_ROOT/bin/grpcurl`); scenario e falls back to the admin HTML without it, h and i need it |
 | `SCENARIOS` | subset of `ab c d e f gh i j`; default `ab c d e f gh j` |

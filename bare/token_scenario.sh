@@ -15,11 +15,11 @@ REPO=$(cd "$HERE/.." && pwd)
 # --- Knobs -------------------------------------------------------------------
 # Scheduler under test: a bb-remote-execution checkout swapped in with
 # --override_module.
-: "${BB_RE_DIR:=/home/greg/s/bb-remote-execution-token-pools}"
-: "${HARNESS_ROOT:=/home/greg/tmp/bb-bare}"
+: "${BB_RE_DIR:?set BB_RE_DIR to a bb-remote-execution checkout that implements token pools}"
+: "${HARNESS_ROOT:=${TMPDIR:-/tmp}/bb-bare}"
 : "${WORK_DIR:=$HARNESS_ROOT/work}"          # bare's working directory
 : "${RUN_DIR:=$HARNESS_ROOT/runs/$(date +%Y%m%d-%H%M%S)}"
-: "${OUTPUT_USER_ROOT:=/bazel-cache/greg/bbdep}"
+: "${OUTPUT_USER_ROOT:=$HARNESS_ROOT/bazel}"  # keeps the deployment build off ~/.cache
 : "${BAZEL:=bazel}"
 : "${BAZEL_STARTUP:=--output_user_root=$OUTPUT_USER_ROOT --host_jvm_args=-Xmx6g}"
 : "${BUILD:=1}"                              # 0 = reuse the last //bare:bare build
