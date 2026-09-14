@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Scenario harness for scheduler license token pools. See TOKEN_HARNESS.md.
 #
-# Builds //bare:bare with the scheduler under test swapped in, launches the
-# bare deployment's processes one by one (the bare launcher stops every
-# process when any one exits, which rules out restarting only the scheduler),
+# Builds bb_scheduler, bb_worker and bb_runner in the checkout under test and
+# the rest of the deployment from this workspace's //bare:bare, launches the
+# processes one by one (the bare launcher stops every process when any one
+# exits, which rules out restarting only the scheduler),
 # drives the synthetic/ client workspace against the frontend and prints a
 # PASS/FAIL table. Every knob is an environment variable so the same script
 # can run against another deployment with LAUNCH=0.
@@ -13,8 +14,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 
 # --- Knobs -------------------------------------------------------------------
-# Scheduler under test: a bb-remote-execution checkout swapped in with
-# --override_module.
+# Scheduler under test: a bb-remote-execution checkout. Its own Bazel
+# workspace builds bb_scheduler, bb_worker and bb_runner, so its module graph
+# never has to agree with this repository's pins.
 : "${BB_RE_DIR:?set BB_RE_DIR to a bb-remote-execution checkout that implements token pools}"
 : "${HARNESS_ROOT:=${TMPDIR:-/tmp}/bb-bare}"
 : "${WORK_DIR:=$HARNESS_ROOT/work}"          # bare's working directory
@@ -22,9 +24,12 @@ REPO=$(cd "$HERE/.." && pwd)
 : "${OUTPUT_USER_ROOT:=$HARNESS_ROOT/bazel}"  # keeps the deployment build off ~/.cache
 : "${BAZEL:=bazel}"
 : "${BAZEL_STARTUP:=--output_user_root=$OUTPUT_USER_ROOT --host_jvm_args=-Xmx6g}"
-: "${BUILD:=1}"                              # 0 = reuse the last //bare:bare build
+: "${BUILD:=1}"                              # 0 = reuse the last builds
 : "${BUILD_STARTUP:=}"                       # e.g. --bazelrc=<rbe.bazelrc>
 : "${BUILD_FLAGS:=}"                         # e.g. --config=rbe
+# The same for the build inside BB_RE_DIR; default to the values above.
+: "${RE_BUILD_STARTUP=$BUILD_STARTUP}"
+: "${RE_BUILD_FLAGS=$BUILD_FLAGS}"
 : "${LAUNCH:=1}"                             # 0 = target an already running deployment
 : "${KEEP:=0}"                               # 1 = leave the deployment running on exit
 : "${OS:=Linux}"                             # std.extVar('OS') in worker/runner configs
@@ -137,17 +142,29 @@ print_table() {
 }
 
 # --- Deployment --------------------------------------------------------------
-build_bare() {
-  log "Building //bare:bare with bb_remote_execution=$BB_RE_DIR"
-  (cd "$REPO" && $BAZEL $BAZEL_STARTUP $BUILD_STARTUP build $BUILD_FLAGS \
-    --override_module=com_github_buildbarn_bb_remote_execution="$BB_RE_DIR" \
-    //bare:bare) >"$LOG_DIR/build.log" 2>&1 || { tail -30 "$LOG_DIR/build.log" >&2; return 1; }
+RE_TARGETS=(//cmd/bb_scheduler //cmd/bb_worker //cmd/bb_runner)
+
+build_deployment() {
+  log "Building //bare:bare (storage, frontend, portal)"
+  (cd "$REPO" && $BAZEL $BAZEL_STARTUP $BUILD_STARTUP build $BUILD_FLAGS //bare:bare) \
+    >"$LOG_DIR/build.log" 2>&1 || { tail -30 "$LOG_DIR/build.log" >&2; return 1; }
+  log "Building ${RE_TARGETS[*]} in $BB_RE_DIR"
+  # No convenience symlinks: the checkout may belong to somebody else's
+  # Bazel server and must not be touched.
+  (cd "$BB_RE_DIR" && $BAZEL $BAZEL_STARTUP $RE_BUILD_STARTUP build $RE_BUILD_FLAGS \
+    --experimental_convenience_symlinks=ignore "${RE_TARGETS[@]}") \
+    >"$LOG_DIR/build_re.log" 2>&1 || { tail -30 "$LOG_DIR/build_re.log" >&2; return 1; }
 }
 
 runfiles_dir() {
   local bin
   bin=$(cd "$REPO" && $BAZEL $BAZEL_STARTUP info bazel-bin 2>/dev/null)
   echo "$bin/bare/bare_/bare.runfiles"
+}
+re_bin_dir() {
+  local bin
+  bin=$(cd "$BB_RE_DIR" && $BAZEL $BAZEL_STARTUP info bazel-bin 2>/dev/null)
+  echo "$bin/cmd"
 }
 
 start_process() { # name binary config [working directory]
@@ -173,7 +190,7 @@ launch_deployment() {
   local rf; rf=$(runfiles_dir)
   local storage=$rf/com_github_buildbarn_bb_storage+/cmd/bb_storage/bb_storage_/bb_storage
   local portal=$rf/com_github_buildbarn_bb_portal+/cmd/bb_portal/bb_portal_/bb_portal
-  RE_BIN_DIR=$rf/com_github_buildbarn_bb_remote_execution+/cmd
+  RE_BIN_DIR=$(re_bin_dir)
   CFG_DIR=$HERE/config
   # Same directories the bare launcher creates.
   mkdir -p "$WORK_DIR"/{storage-ac,storage-cas,storage-fsac}/persistent_state \
@@ -693,7 +710,7 @@ if [[ $WORKER_X == auto ]]; then
   WORKER_X=0; for s in $SCENARIOS; do [[ $s == i ]] && WORKER_X=1; done
 fi
 if [[ $LAUNCH == 1 ]]; then
-  [[ $BUILD == 1 ]] && build_bare
+  [[ $BUILD == 1 ]] && build_deployment
   launch_deployment
   wait_for_scheduler
   wait_for_no_workers_window

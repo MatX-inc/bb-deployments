@@ -32,9 +32,10 @@ failure mode the feature removes.
   `--define=RUN_ID=...` per build so nothing is an action cache hit. Its
   `.bazelrc` targets `grpc://localhost:8980`, instance `local`,
   `--spawn_strategy=remote`.
-- `bare/token_scenario.sh` builds `//bare:bare` with the scheduler under test
-  swapped in via `--override_module=com_github_buildbarn_bb_remote_execution`,
-  launches the six processes itself (the `bare` launcher stops all of them
+- `bare/token_scenario.sh` builds bb_scheduler, bb_worker and bb_runner in
+  the checkout under test (`BB_RE_DIR`, its own Bazel workspace) and storage,
+  frontend and portal from this repository's `//bare:bare`, launches the
+  six processes itself (the `bare` launcher stops all of them
   when any one exits, so it cannot restart only the scheduler), samples
   `:9982/metrics` once a second, runs the scenarios and prints a PASS/FAIL
   table. Logs and samples land in `$RUN_DIR`; the monitoring-surface
@@ -68,7 +69,8 @@ Knobs, all environment variables with defaults in the script:
 | `TOKEN_POOL_NAME`, `TOKEN_POOL_CAPACITY`, `TOKEN_POOL_STARTUP_GRACE_PERIOD` | pool definition; durations must be in seconds (`5s`) |
 | `TOKEN_POOL_INSTANCE_NAME_PREFIX` | default empty: pools are resolved by the platform queue's prefix, which is the worker's `instanceNamePrefix` (empty in `worker.jsonnet`), not by the client's `--remote_instance_name` |
 | `PLATFORM_QUEUE_WITH_NO_WORKERS_TIMEOUT` | default `10s`, instead of upstream's `900s`, so an action for a platform without workers fails with FailedPrecondition instead of Unavailable retries |
-| `BUILD`, `BUILD_STARTUP`, `BUILD_FLAGS` | skip the build, add startup options (`--bazelrc=`), add build flags (`--config=`) |
+| `BUILD`, `BUILD_STARTUP`, `BUILD_FLAGS` | skip the builds, add startup options (`--bazelrc=`), add build flags (`--config=`) to the `//bare:bare` build |
+| `RE_BUILD_STARTUP`, `RE_BUILD_FLAGS` | the same for the build inside `BB_RE_DIR`; default to `BUILD_STARTUP` and `BUILD_FLAGS` |
 | `BAZEL_STARTUP`, `OUTPUT_USER_ROOT` | startup options for the deployment build (default `--output_user_root=$HARNESS_ROOT/bazel --host_jvm_args=-Xmx6g`; `HARNESS_ROOT` defaults to `$TMPDIR/bb-bare`) |
 | `LAUNCH=0`, `EXECUTOR`, `INSTANCE_NAME`, `METRICS_URL`, `ADMIN_URL`, `BQS_ADDRESS` | target a deployment that is already running elsewhere |
 | `GRPCURL` | path to grpcurl (default: `$PATH`, then `$HARNESS_ROOT/bin/grpcurl`); scenario e falls back to the admin HTML without it, h and i need it |
@@ -82,12 +84,16 @@ The bare processes hold ports 7982, 8980-8984, 9982, 9986, 9987 (plus 9988,
 The client runs with `--nosystem_rc --nohome_rc` so this host's BES or cache
 settings do not sit between the client and the deployment under test.
 
-Building against a checkout newer than the pinned `bb_remote_execution` needs
-the root `go.sum` to know the checkout's dependency versions: gazelle's
-`go_deps` resolves versions across all Bazel modules but reads hashes from the
-root `go.sum` only. This branch appends the checkout's `go.sum` and drops the
-root's go-fuse `replace` and patch override, which the newer checkout no
-longer carries.
+The scheduler-side binaries are built inside `BB_RE_DIR` with that
+checkout's own `MODULE.bazel`, so this repository's `bb_remote_execution` pin
+and Go module graph stay untouched (an `--override_module` of a newer
+checkout would need this workspace's `go.sum` to carry the checkout's
+dependency versions, which `go mod tidy` in CI removes again). Storage,
+frontend and portal come from this repository's pins; they talk to the
+scheduler over stable REv2 and Buildbarn protocols. `RE_BUILD_STARTUP` and
+`RE_BUILD_FLAGS` default to `BUILD_STARTUP` and `BUILD_FLAGS`; the build in
+`BB_RE_DIR` passes `--experimental_convenience_symlinks=ignore` so the
+checkout's `bazel-*` links are left alone.
 
 ## Scenarios
 
