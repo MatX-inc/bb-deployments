@@ -1,0 +1,15 @@
+# Client workspace for bare/token_scenario.sh. Every action runs remotely
+# against the bare deployment's frontend; the script overrides the executor
+# and instance name on the command line for other environments.
+build --remote_executor=grpc://localhost:8980
+build --remote_instance_name=local
+build --jobs=32
+build --spawn_strategy=remote
+# The restart scenario kills the scheduler mid-build; Bazel's default budget
+# of 5 retries (about 3 s cumulative back-off) is shorter than the time the
+# worker needs to re-synchronize with the relaunched scheduler.
+build --remote_retries=10
+build --remote_download_toplevel
+common --lockfile_mode=off
+# Several output bases share this workspace; keep bazel-* symlinks out of it.
+build --experimental_convenience_symlinks=ignore
